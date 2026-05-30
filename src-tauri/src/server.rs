@@ -11,6 +11,12 @@ struct TrafficLight {
     interval: f64,
 }
 
+#[derive(Clone, Serialize)]
+struct TransparencyPayload {
+    transparency: f64,
+}
+
+#[derive(Clone)]
 pub struct ServerInfo {
     pub port: u16,
     pub lan_ip: String,
@@ -51,28 +57,50 @@ fn handle(app: &AppHandle, req: tiny_http::Request) {
         );
         return;
     }
-    let (color, interval) = parse_query(req.url());
-    let resp = match (color.as_deref(), interval) {
-        (Some(c), Some(i)) if matches!(c, "red" | "yellow" | "green") && i >= 0.0 => {
+    let (color, interval, transparency) = parse_query(req.url());
+
+    let mut emitted = false;
+    let mut resp_parts = Vec::new();
+
+    if let (Some(c), Some(i)) = (color.as_deref(), interval) {
+        if matches!(c, "red" | "yellow" | "green") && i >= 0.0 {
             let payload = TrafficLight {
                 color: c.to_string(),
                 interval: i,
             };
             let _ = app.emit("traffic-light", payload);
-            Response::from_string(format!("ok color={c} interval={i}\n"))
+            emitted = true;
+            resp_parts.push(format!("color={c} interval={i}"));
         }
-        _ => Response::from_string(
-            "usage: GET /?color={red|yellow|green}&interval={milliseconds, 0 = solid}\n",
-        )
-        .with_status_code(400),
-    };
-    let _ = req.respond(resp);
+    }
+
+    if let Some(t) = transparency {
+        if (0.0..=1.0).contains(&t) {
+            let payload = TransparencyPayload { transparency: t };
+            let _ = app.emit("traffic-transparency", payload);
+            emitted = true;
+            resp_parts.push(format!("transparency={t}"));
+        }
+    }
+
+    if emitted {
+        let msg = format!("ok {}\n", resp_parts.join(", "));
+        let _ = req.respond(Response::from_string(msg));
+    } else {
+        let _ = req.respond(
+            Response::from_string(
+                "usage: GET /?color={red|yellow|green}&interval={ms, 0=solid}&transparency={0.0-1.0}\n",
+            )
+            .with_status_code(400),
+        );
+    }
 }
 
-fn parse_query(url: &str) -> (Option<String>, Option<f64>) {
+fn parse_query(url: &str) -> (Option<String>, Option<f64>, Option<f64>) {
     let q = url.split_once('?').map(|(_, q)| q).unwrap_or("");
     let mut color = None;
     let mut interval = None;
+    let mut transparency = None;
     for pair in q.split('&') {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
@@ -80,10 +108,11 @@ fn parse_query(url: &str) -> (Option<String>, Option<f64>) {
         match k {
             "color" => color = Some(v.to_string()),
             "interval" => interval = v.parse().ok(),
+            "transparency" => transparency = v.parse().ok(),
             _ => {}
         }
     }
-    (color, interval)
+    (color, interval, transparency)
 }
 
 fn detect_lan_ip() -> Option<String> {

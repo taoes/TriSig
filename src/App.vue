@@ -5,11 +5,13 @@ import { listen } from "@tauri-apps/api/event";
 const phases = ["red", "yellow", "green"];
 const active = ref(0);
 const visible = ref(true);
+const bgOpacity = ref(1.0);
 let blinkTimer = null;
-let unlisten = null;
+let unlistenLight = null;
+let unlistenTrans = null;
 
 onMounted(async () => {
-  unlisten = await listen("traffic-light", (event) => {
+  unlistenLight = await listen("traffic-light", (event) => {
     const { color, interval } = event.payload ?? {};
     const idx = phases.indexOf(color);
     if (idx < 0) return;
@@ -26,17 +28,29 @@ onMounted(async () => {
       }, ms);
     }
   });
+
+  unlistenTrans = await listen("traffic-transparency", (event) => {
+    const { transparency } = event.payload ?? {};
+    if (typeof transparency === "number" && transparency >= 0 && transparency <= 1) {
+      bgOpacity.value = transparency;
+    }
+  });
 });
 
 onUnmounted(() => {
   if (blinkTimer) clearInterval(blinkTimer);
-  if (unlisten) unlisten();
+  if (unlistenLight) unlistenLight();
+  if (unlistenTrans) unlistenTrans();
 });
 </script>
 
 <template>
   <main class="container" data-tauri-drag-region>
-    <div class="traffic-light" data-tauri-drag-region>
+    <div
+      class="traffic-light"
+      :style="{ '--traffic-bg-opacity': bgOpacity }"
+      data-tauri-drag-region
+  >
       <div
         v-for="(color, i) in phases"
         :key="color"
@@ -84,10 +98,16 @@ body,
   width: 56px;
   height: 150px;
   padding: 8px 0;
-  background: linear-gradient(145deg, #2a2a2a, #111);
+  --traffic-bg-opacity: 1;
+  background: linear-gradient(
+    145deg,
+    rgba(42, 42, 42, var(--traffic-bg-opacity)),
+    rgba(17, 17, 17, var(--traffic-bg-opacity))
+  );
   border-radius: 14px;
-  box-shadow: inset 0 2px 3px rgba(255, 255, 255, 0.08),
-    inset 0 -2px 3px rgba(0, 0, 0, 0.6), 0 4px 10px rgba(0, 0, 0, 0.45);
+  box-shadow: inset 0 2px 3px rgba(255, 255, 255, calc(0.08 * var(--traffic-bg-opacity))),
+    inset 0 -2px 3px rgba(0, 0, 0, calc(0.6 * var(--traffic-bg-opacity))),
+    0 4px 10px rgba(0, 0, 0, calc(0.45 * var(--traffic-bg-opacity)));
 }
 
 .lamp {
