@@ -7,7 +7,7 @@ A lightweight desktop traffic light status indicator that displays red, yellow, 
 
 ## Use Cases
 
-- **Claude Code / Automation Tool Status**: Switch light colors via HTTP requests in Claude Code hooks or scripts to visually indicate current work status (e.g., processing / waiting for input / idle). See `docs/claude_code.md` for a local hook example.
+- **Claude Code / Automation Tool Status**: Switch light colors via HTTP requests in Claude Code hooks or scripts to visually indicate current work status (e.g., processing / waiting for input / idle). See [docs/claude_code.md](docs/claude_code.md) for a local hook example.
 - **CI/CD Pipeline Monitoring**: Build scripts send requests at key stages for instant desktop feedback on pipeline progress
 - **Local Service Health Check**: Periodically request a health endpoint — red light blinks when the service is down
 - **Pomodoro / Focus Mode**: Control light transitions via scripts as a distraction-free visual signal
