@@ -1,13 +1,15 @@
 mod server;
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use arboard::Clipboard;
+use serde::{Deserialize, Serialize};
 use server::ServerInfo;
 use tauri::{
-    menu::{MenuBuilder, MenuItem, SubmenuBuilder},
+    menu::{CheckMenuItem, MenuBuilder, MenuItem, SubmenuBuilder},
     tray::TrayIconBuilder,
-    Emitter, LogicalPosition, Manager, Monitor, WebviewWindow,
+    AppHandle, Emitter, LogicalPosition, Manager, Monitor, WebviewWindow, Wry,
 };
 use tauri_plugin_notification::NotificationExt;
 
@@ -19,21 +21,113 @@ enum Corner {
     BottomRight,
 }
 
+impl Corner {
+    fn as_str(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "top-left",
+            Corner::TopRight => "top-right",
+            Corner::BottomLeft => "bottom-left",
+            Corner::BottomRight => "bottom-right",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "top-left" => Corner::TopLeft,
+            "bottom-left" => Corner::BottomLeft,
+            "bottom-right" => Corner::BottomRight,
+            _ => Corner::TopRight,
+        }
+    }
+}
+
 struct AppState {
     corner: Mutex<Corner>,
     monitor_index: Mutex<usize>,
     server_info: Mutex<Option<ServerInfo>>,
     transparency: Mutex<f64>,
+    muted: Mutex<bool>,
+    mute_item: Mutex<Option<CheckMenuItem<Wry>>>,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Serialize)]
 struct TransparencyEvent {
     transparency: f64,
+}
+
+#[derive(Clone, Serialize)]
+struct MuteEvent {
+    muted: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct AppStateSnapshot {
+    transparency: f64,
+    muted: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct Config {
+    corner: String,
+    monitor_index: Option<usize>,
+    transparency: f64,
+    muted: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            corner: "top-right".to_string(),
+            monitor_index: None,
+            transparency: 1.0,
+            muted: false,
+        }
+    }
 }
 
 const WINDOW_W: f64 = 100.0;
 const WINDOW_H: f64 = 180.0;
 const MARGIN: f64 = 20.0;
+
+fn config_path(app: &AppHandle) -> Option<PathBuf> {
+    let home = app.path().home_dir().ok()?;
+    Some(home.join(".config").join("trisig.json"))
+}
+
+fn load_config(app: &AppHandle) -> Config {
+    config_path(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_config(app: &AppHandle) {
+    let Some(path) = config_path(app) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let state = app.state::<AppState>();
+    let config = Config {
+        corner: state.corner.lock().unwrap().as_str().to_string(),
+        monitor_index: Some(*state.monitor_index.lock().unwrap()),
+        transparency: *state.transparency.lock().unwrap(),
+        muted: *state.muted.lock().unwrap(),
+    };
+    if let Ok(content) = serde_json::to_string_pretty(&config) {
+        let _ = std::fs::write(path, content);
+    }
+}
+
+#[tauri::command]
+fn get_app_state(state: tauri::State<'_, AppState>) -> AppStateSnapshot {
+    AppStateSnapshot {
+        transparency: *state.transparency.lock().unwrap(),
+        muted: *state.muted.lock().unwrap(),
+    }
+}
 
 fn position_window(window: &WebviewWindow, monitor: &Monitor, corner: Corner) {
     let scale = monitor.scale_factor();
@@ -78,21 +172,38 @@ pub fn run() {
             monitor_index: Mutex::new(0),
             server_info: Mutex::new(None),
             transparency: Mutex::new(1.0),
+            muted: Mutex::new(false),
+            mute_item: Mutex::new(None),
         })
+        .invoke_handler(tauri::generate_handler![get_app_state])
         .setup(|app| {
+            let config = load_config(app.handle());
+
             let window = app.get_webview_window("main").expect("main window missing");
             let monitors = window.available_monitors().unwrap_or_default();
 
-            let largest_idx = monitors
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, m)| {
-                    let s = m.size();
-                    u64::from(s.width) * u64::from(s.height)
-                })
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            *app.state::<AppState>().monitor_index.lock().unwrap() = largest_idx;
+            let initial_idx = config
+                .monitor_index
+                .filter(|&i| i < monitors.len())
+                .unwrap_or_else(|| {
+                    monitors
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, m)| {
+                            let s = m.size();
+                            u64::from(s.width) * u64::from(s.height)
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(0)
+                });
+
+            {
+                let state = app.state::<AppState>();
+                *state.corner.lock().unwrap() = Corner::parse(&config.corner);
+                *state.monitor_index.lock().unwrap() = initial_idx;
+                *state.transparency.lock().unwrap() = config.transparency;
+                *state.muted.lock().unwrap() = config.muted;
+            }
 
             apply_layout(app.handle());
 
@@ -126,6 +237,16 @@ pub fn run() {
                 )?;
                 menu_builder = menu_builder.item(&down).separator();
             }
+
+            let mute_item = CheckMenuItem::with_id(
+                app,
+                "mute:toggle",
+                "静音",
+                true,
+                config.muted,
+                None::<&str>,
+            )?;
+            *app.state::<AppState>().mute_item.lock().unwrap() = Some(mute_item.clone());
 
             let mut display_submenu = SubmenuBuilder::new(app, "移动到显示器");
             for (i, mon) in monitors.iter().enumerate() {
@@ -182,6 +303,7 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
             let menu = menu_builder
+                .item(&mute_item)
                 .item(&display_submenu)
                 .item(&trans_sub)
                 .item(&corner_sub)
@@ -199,10 +321,24 @@ pub fn run() {
                         return;
                     }
                     let state = app.state::<AppState>();
+                    if id == "mute:toggle" {
+                        let new_muted = {
+                            let mut m = state.muted.lock().unwrap();
+                            *m = !*m;
+                            *m
+                        };
+                        if let Some(item) = state.mute_item.lock().unwrap().as_ref() {
+                            let _ = item.set_checked(new_muted);
+                        }
+                        let _ = app.emit("traffic-mute", MuteEvent { muted: new_muted });
+                        save_config(app);
+                        return;
+                    }
                     if let Some(idx_str) = id.strip_prefix("monitor:") {
                         if let Ok(idx) = idx_str.parse::<usize>() {
                             *state.monitor_index.lock().unwrap() = idx;
                             apply_layout(app);
+                            save_config(app);
                         }
                         return;
                     }
@@ -236,6 +372,7 @@ pub fn run() {
                                 "traffic-transparency",
                                 TransparencyEvent { transparency: val },
                             );
+                            save_config(app);
                         }
                         return;
                     }
@@ -243,18 +380,22 @@ pub fn run() {
                         "corner:top-left" => {
                             *state.corner.lock().unwrap() = Corner::TopLeft;
                             apply_layout(app);
+                            save_config(app);
                         }
                         "corner:top-right" => {
                             *state.corner.lock().unwrap() = Corner::TopRight;
                             apply_layout(app);
+                            save_config(app);
                         }
                         "corner:bottom-left" => {
                             *state.corner.lock().unwrap() = Corner::BottomLeft;
                             apply_layout(app);
+                            save_config(app);
                         }
                         "corner:bottom-right" => {
                             *state.corner.lock().unwrap() = Corner::BottomRight;
                             apply_layout(app);
+                            save_config(app);
                         }
                         _ => {}
                     }

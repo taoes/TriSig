@@ -1,26 +1,61 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import startSfx from "./assets/start.mp3";
+import pauseSfx from "./assets/pause.mp3";
+import endSfx from "./assets/end.mp3";
 
 const phases = ["red", "yellow", "green"];
 const active = ref(0);
 const visible = ref(true);
 const bgOpacity = ref(1.0);
+const muted = ref(false);
 let blinkTimer = null;
 let unlistenLight = null;
 let unlistenTrans = null;
+let unlistenMute = null;
+
+const sfx = {
+  green: new Audio(startSfx),
+  yellow: new Audio(pauseSfx),
+  red: new Audio(endSfx),
+};
+
+const playSfx = (color) => {
+  if (muted.value) return;
+  const audio = sfx[color];
+  if (!audio) return;
+  audio.pause();
+  audio.currentTime = 0;
+  audio.play().catch(() => {});
+};
 
 onMounted(async () => {
+  try {
+    const snapshot = await invoke("get_app_state");
+    if (snapshot && typeof snapshot.transparency === "number") {
+      bgOpacity.value = snapshot.transparency;
+    }
+    if (snapshot && typeof snapshot.muted === "boolean") {
+      muted.value = snapshot.muted;
+    }
+  } catch (e) {
+    // ignore — fall back to defaults
+  }
+
   unlistenLight = await listen("traffic-light", (event) => {
     const { color, interval } = event.payload ?? {};
     const idx = phases.indexOf(color);
     if (idx < 0) return;
+    const changed = active.value !== idx;
     active.value = idx;
     visible.value = true;
     if (blinkTimer) {
       clearInterval(blinkTimer);
       blinkTimer = null;
     }
+    if (changed) playSfx(color);
     const ms = Number(interval);
     if (Number.isFinite(ms) && ms > 0) {
       blinkTimer = setInterval(() => {
@@ -35,12 +70,20 @@ onMounted(async () => {
       bgOpacity.value = transparency;
     }
   });
+
+  unlistenMute = await listen("traffic-mute", (event) => {
+    const { muted: next } = event.payload ?? {};
+    if (typeof next === "boolean") {
+      muted.value = next;
+    }
+  });
 });
 
 onUnmounted(() => {
   if (blinkTimer) clearInterval(blinkTimer);
   if (unlistenLight) unlistenLight();
   if (unlistenTrans) unlistenTrans();
+  if (unlistenMute) unlistenMute();
 });
 </script>
 
